@@ -68,7 +68,7 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
             if prod is not None:
                 sku_node = prod.find('nfe:cProd', ns)
                 qtd_node = prod.find('nfe:qCom', ns)
-                desc_node = prod.find('nfe:xProd', ns) # Nova extração: Descrição do produto
+                desc_node = prod.find('nfe:xProd', ns)
                 
                 if sku_node is not None and qtd_node is not None:
                     sku = sku_node.text
@@ -78,7 +78,7 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
                     dados_extraidos.append({
                         'DataEmissaoRaw': data_emissao_str,
                         'SKU': sku,
-                        'Descricao': descricao, # Adicionado ao dicionário
+                        'Descricao': descricao,
                         'Quantidade': quantidade,
                         'Tipo': tipo_nota
                     })
@@ -156,7 +156,7 @@ with aba_saidas:
         elif usar_filtro_data_saidas and data_inicial_saidas > data_final_saidas:
             st.error("Corrija o período das datas.")
         else:
-            with st.spinner("Processando Vendas e Devoluções..."):
+            with st.spinner("Processando Vendas, Devoluções e validando descrições..."):
                 chaves_processadas_saidas = set()
                 cont_saidas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
                 
@@ -174,15 +174,31 @@ with aba_saidas:
                     if df_total_saidas.empty:
                         st.warning("Nenhum produto encontrado no período selecionado.")
                     else:
+                        # 1. Encontrar a melhor DESCRIÇÃO para cada SKU (maior volume de movimentação)
+                        df_descricoes_saidas = df_total_saidas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
+                        df_melhor_desc_saidas = df_descricoes_saidas.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                        
+                        # 2. Criar a Tabela Dinâmica (Pivot Table) para Vendas e Devoluções
                         relatorio_saidas = pd.pivot_table(df_total_saidas, values='Quantidade', index='SKU', columns='Tipo', aggfunc='sum', fill_value=0).reset_index()
                         
                         if 'Venda' not in relatorio_saidas.columns: relatorio_saidas['Venda'] = 0
                         if 'Devolucao' not in relatorio_saidas.columns: relatorio_saidas['Devolucao'] = 0
                             
                         relatorio_saidas['Saldo Líquido'] = relatorio_saidas['Venda'] - relatorio_saidas['Devolucao']
+                        
+                        # 3. Mesclar a Tabela Dinâmica com a Melhor Descrição
+                        relatorio_saidas = pd.merge(relatorio_saidas, df_melhor_desc_saidas[['SKU', 'Descricao']], on='SKU', how='left')
+                        
+                        # 4. Organizar a ordem das colunas
+                        relatorio_saidas = relatorio_saidas[['SKU', 'Descricao', 'Venda', 'Devolucao', 'Saldo Líquido']]
                         relatorio_saidas = relatorio_saidas.sort_values(by='Venda', ascending=False)
                         
                         st.success(f"✅ Sucesso! Lidas {len(chaves_processadas_saidas) - cont_saidas['sem_sku']} notas válidas.")
+                        if cont_saidas['duplicatas'] > 0: st.warning(f"🔄 Ignorados {cont_saidas['duplicatas']} arquivos repetidos.")
+                        if cont_saidas['sem_sku'] > 0:
+                            st.error(f"⚠️ {cont_saidas['sem_sku']} arquivos sem produtos.")
+                            with st.expander("👀 Ver arquivos"):
+                                for arq in cont_saidas['nomes_sem_sku']: st.write(f"- {arq}")
                         
                         st.dataframe(relatorio_saidas, use_container_width=True)
                         
@@ -190,7 +206,8 @@ with aba_saidas:
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                             relatorio_saidas.to_excel(writer, index=False, sheet_name='Saidas_e_Devolucoes')
                         
-                        st.download_button("💾 Baixar Excel (Vendas)", data=buffer.getvalue(), file_name="relatorio_saidas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_saidas")
+                        nome_excel_saidas = f"relatorio_saidas_{data_inicial_saidas}_a_{data_final_saidas}.xlsx" if usar_filtro_data_saidas else "relatorio_saidas_total.xlsx"
+                        st.download_button("💾 Baixar Excel (Vendas)", data=buffer.getvalue(), file_name=nome_excel_saidas, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_saidas")
                 else:
                     st.error("❌ Nenhum dado válido encontrado.")
 
@@ -231,51 +248,4 @@ with aba_entradas:
             st.error("Corrija o período das datas.")
         else:
             with st.spinner("Processando Notas de Entrada e validando descrições..."):
-                chaves_processadas_entradas = set()
-                cont_entradas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
-                
-                df_entradas = processar_arquivos(arquivos_entrada, 'Entrada', chaves_processadas_entradas, cont_entradas) if arquivos_entrada else pd.DataFrame()
-                
-                if not df_entradas.empty:
-                    df_entradas['DataFormatada'] = pd.to_datetime(df_entradas['DataEmissaoRaw'], errors='coerce').dt.date
-                    
-                    if usar_filtro_data_entradas:
-                        df_entradas = df_entradas[(df_entradas['DataFormatada'] >= data_inicial_entradas) & (df_entradas['DataFormatada'] <= data_final_entradas)]
-                    
-                    if df_entradas.empty:
-                        st.warning("Nenhum produto encontrado no período selecionado.")
-                    else:
-                        # 1. Calcula a QUANTIDADE TOTAL por SKU
-                        df_total_sku = df_entradas.groupby('SKU', as_index=False)['Quantidade'].sum()
-                        df_total_sku = df_total_sku.rename(columns={'Quantidade': 'Quantidade Comprada'})
-                        
-                        # 2. Descobre qual DESCRIÇÃO teve a maior quantidade para aquele SKU
-                        # Agrupa por SKU e Descrição e soma
-                        df_descricoes = df_entradas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
-                        # Ordena da maior quantidade para a menor, e remove duplicatas mantendo a primeira (que será a maior)
-                        df_melhor_descricao = df_descricoes.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
-                        
-                        # 3. Junta as duas informações (Total real + Melhor Descrição)
-                        relatorio_entradas = pd.merge(df_total_sku, df_melhor_descricao[['SKU', 'Descricao']], on='SKU')
-                        
-                        # 4. Organiza a ordem das colunas para: SKU, Descricao, Quantidade
-                        relatorio_entradas = relatorio_entradas[['SKU', 'Descricao', 'Quantidade Comprada']]
-                        relatorio_entradas = relatorio_entradas.sort_values(by='Quantidade Comprada', ascending=False)
-                        
-                        st.success(f"✅ Sucesso! Lidas {len(chaves_processadas_entradas) - cont_entradas['sem_sku']} notas de entrada válidas.")
-                        
-                        st.dataframe(relatorio_entradas, use_container_width=True)
-                        
-                        buffer_ent = io.BytesIO()
-                        with pd.ExcelWriter(buffer_ent, engine='openpyxl') as writer:
-                            relatorio_entradas.to_excel(writer, index=False, sheet_name='Entradas')
-                        
-                        # Nome do arquivo dinâmico
-                        if usar_filtro_data_entradas:
-                            nome_excel_entradas = f"relatorio_entradas_{data_inicial_entradas}_a_{data_final_entradas}.xlsx"
-                        else:
-                            nome_excel_entradas = "relatorio_entradas_total.xlsx"
-                            
-                        st.download_button("💾 Baixar Excel (Entradas)", data=buffer_ent.getvalue(), file_name=nome_excel_entradas, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
-                else:
-                    st.error("❌ Nenhum dado válido encontrado.")
+                ch
