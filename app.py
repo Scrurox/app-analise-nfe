@@ -8,7 +8,7 @@ import zipfile
 st.set_page_config(page_title="Analisador de NF-e", layout="wide")
 
 st.title("📊 Analisador de Vendas e Devoluções por SKU")
-st.write("Faça o upload dos seus arquivos XML ou .ZIP. O sistema ignora automaticamente notas fiscais duplicadas.")
+st.write("Faça o upload dos seus arquivos XML ou .ZIP. O sistema ignora automaticamente notas fiscais duplicadas e avisa quantas foram encontradas.")
 
 # Inicializa uma variável de controle no Session State para limpar os arquivos
 if "upload_key" not in st.session_state:
@@ -17,8 +17,8 @@ if "upload_key" not in st.session_state:
 def limpar_uploads():
     st.session_state.upload_key += 1
 
-# Função auxiliar para extrair os dados e checar a chave de acesso
-def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas):
+# Função auxiliar para extrair os dados, checar a chave e contar duplicatas
+def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas, contadores):
     dados_extraidos = []
     ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
     
@@ -26,23 +26,23 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas)
         tree = ET.parse(arquivo_lido)
         root = tree.getroot()
         
-        # 1. Busca a tag infNFe para capturar a Chave de Acesso única da nota
+        # Busca a Chave de Acesso da nota
         inf_nfe = root.find('.//nfe:infNFe', ns)
         
         if inf_nfe is not None and 'Id' in inf_nfe.attrib:
-            chave_acesso = inf_nfe.attrib['Id'] # Ex: 'NFe35230100000000000000000000000000000000000000'
+            chave_acesso = inf_nfe.attrib['Id']
         else:
-            # Fallback caso seja um XML fora do padrão, usa o nome do arquivo
             chave_acesso = nome_arquivo
             
-        # 2. Verifica se a nota já foi processada nesta execução
+        # Verifica se a nota já foi processada
         if chave_acesso in chaves_processadas:
-            return [] # Ignora o arquivo e retorna vazio para evitar duplicidade
+            contadores['duplicatas'] += 1  # Soma +1 no contador de arquivos repetidos
+            return [] # Retorna vazio para ignorar
             
-        # 3. Se é inédita, adiciona a chave na lista de controle
+        # Se é inédita, adiciona na lista
         chaves_processadas.add(chave_acesso)
         
-        # 4. Processa os itens da nota
+        # Processa os itens da nota
         for det in root.findall('.//nfe:det', ns):
             prod = det.find('nfe:prod', ns)
             if prod is not None:
@@ -61,7 +61,7 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas)
     return dados_extraidos
 
 # Função principal de processamento
-def processar_arquivos(lista_arquivos, tipo_nota, chaves_processadas):
+def processar_arquivos(lista_arquivos, tipo_nota, chaves_processadas, contadores):
     dados_finais = []
     
     for arquivo in lista_arquivos:
@@ -71,12 +71,12 @@ def processar_arquivos(lista_arquivos, tipo_nota, chaves_processadas):
                     for nome_arquivo_interno in z.namelist():
                         if nome_arquivo_interno.lower().endswith('.xml'):
                             with z.open(nome_arquivo_interno) as f:
-                                dados_finais.extend(extrair_dados_xml(f, tipo_nota, nome_arquivo_interno, chaves_processadas))
+                                dados_finais.extend(extrair_dados_xml(f, tipo_nota, nome_arquivo_interno, chaves_processadas, contadores))
             except Exception as e:
                 st.error(f"Erro ao abrir o arquivo ZIP {arquivo.name}: {e}")
                 
         elif arquivo.name.lower().endswith('.xml'):
-            dados_finais.extend(extrair_dados_xml(arquivo, tipo_nota, arquivo.name, chaves_processadas))
+            dados_finais.extend(extrair_dados_xml(arquivo, tipo_nota, arquivo.name, chaves_processadas, contadores))
             
     return pd.DataFrame(dados_finais)
 
@@ -85,7 +85,6 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📥 Notas de Venda")
-    st.info("Dica: Para muitas notas, compacte em um arquivo .ZIP")
     arquivos_venda = st.file_uploader(
         "Selecione os XMLs ou um ZIP de Venda", 
         type=['xml', 'zip'], 
@@ -95,7 +94,6 @@ with col1:
 
 with col2:
     st.subheader("📤 Notas de Devolução")
-    st.info("Dica: Para muitas notas, compacte em um arquivo .ZIP")
     arquivos_devolucao = st.file_uploader(
         "Selecione os XMLs ou um ZIP de Devolução", 
         type=['xml', 'zip'], 
@@ -116,13 +114,14 @@ if gerar:
     if not arquivos_venda and not arquivos_devolucao:
         st.warning("⚠️ Por favor, faça o upload de pelo menos um arquivo XML ou ZIP para continuar.")
     else:
-        with st.spinner("Processando arquivos, identificando chaves e removendo duplicidades..."):
+        with st.spinner("Analisando notas e verificando duplicidades..."):
             
-            # Conjunto global (Set) para armazenar as chaves de acesso lidas e evitar duplicidade
+            # Variáveis de controle globais para esta execução
             chaves_processadas = set()
+            contadores = {'duplicatas': 0} # Dicionário para guardar a contagem
             
-            df_vendas = processar_arquivos(arquivos_venda, 'Venda', chaves_processadas) if arquivos_venda else pd.DataFrame()
-            df_devolucoes = processar_arquivos(arquivos_devolucao, 'Devolucao', chaves_processadas) if arquivos_devolucao else pd.DataFrame()
+            df_vendas = processar_arquivos(arquivos_venda, 'Venda', chaves_processadas, contadores) if arquivos_venda else pd.DataFrame()
+            df_devolucoes = processar_arquivos(arquivos_devolucao, 'Devolucao', chaves_processadas, contadores) if arquivos_devolucao else pd.DataFrame()
             
             df_total = pd.concat([df_vendas, df_devolucoes])
             
@@ -143,7 +142,14 @@ if gerar:
                 relatorio = relatorio.sort_values(by='Venda', ascending=False)
                 
                 notas_unicas = len(chaves_processadas)
-                st.success(f"✅ Sucesso! Foram processadas {notas_unicas} notas fiscais únicas (duplicatas foram ignoradas).")
+                
+                # --- EXIBIÇÃO DOS RESULTADOS E AVISOS ---
+                
+                st.success(f"✅ Processamento concluído! Foram processadas {notas_unicas} notas fiscais únicas válidas.")
+                
+                # Se encontrou duplicatas, mostra o aviso laranja na tela!
+                if contadores['duplicatas'] > 0:
+                    st.warning(f"⚠️ Atenção: Foram detectados e ignorados **{contadores['duplicatas']} arquivos em duplicidade** durante o processamento.")
                 
                 st.dataframe(relatorio, use_container_width=True)
                 
@@ -154,7 +160,7 @@ if gerar:
                 st.download_button(
                     label="💾 Baixar Relatório em Excel",
                     data=buffer.getvalue(),
-                    file_name="relatorio_vendas_devolucoes_sem_duplicidade.xlsx",
+                    file_name="relatorio_vendas_devolucoes_final.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
