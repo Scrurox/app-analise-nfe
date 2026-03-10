@@ -9,7 +9,7 @@ import datetime
 st.set_page_config(page_title="Analisador de NF-e", layout="wide")
 
 st.title("📊 Analisador Inteligente de NF-e por SKU")
-st.write("Navegue pelas abas abaixo para analisar suas Vendas/Devoluções ou suas Notas de Entrada (Compras).")
+st.write("Navegue pelos separadores abaixo para analisar Vendas/Devoluções ou Notas de Entrada. Agora com suporte a histórico acumulado!")
 
 # --- CONTROLES DE SESSÃO ---
 if "upload_key_saidas" not in st.session_state:
@@ -32,21 +32,18 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
         tree = ET.parse(arquivo_lido)
         root = tree.getroot()
         
-        # 1. Chave de Acesso
         inf_nfe = root.find('.//nfe:infNFe', ns)
         if inf_nfe is not None and 'Id' in inf_nfe.attrib:
             chave_acesso = inf_nfe.attrib['Id']
         else:
             chave_acesso = nome_arquivo
             
-        # 2. Evita duplicidade
         if chave_acesso in chaves_processadas:
             contadores['duplicatas'] += 1
             return [] 
             
         chaves_processadas.add(chave_acesso)
         
-        # 3. Data de Emissão
         data_emissao_str = None
         ide = root.find('.//nfe:ide', ns)
         if ide is not None:
@@ -62,7 +59,6 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
             if data_bruta and len(data_bruta) == 10:
                 data_emissao_str = data_bruta
         
-        # 4. Itens da Nota
         for det in root.findall('.//nfe:det', ns):
             prod = det.find('nfe:prod', ns)
             if prod is not None:
@@ -71,7 +67,7 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
                 desc_node = prod.find('nfe:xProd', ns)
                 
                 if sku_node is not None and qtd_node is not None:
-                    sku = sku_node.text
+                    sku = str(sku_node.text).strip() # Garante que o SKU seja sempre texto
                     quantidade = float(qtd_node.text)
                     descricao = desc_node.text if desc_node is not None else "Sem Descrição"
                     
@@ -89,7 +85,7 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
             
     except Exception as e:
         if not nome_arquivo.startswith('__MACOSX') and not nome_arquivo.startswith('.'):
-            st.error(f"Erro ao ler o arquivo {nome_arquivo}: {e}")
+            st.error(f"Erro ao ler o ficheiro {nome_arquivo}: {e}")
             
     return dados_extraidos
 
@@ -104,13 +100,13 @@ def processar_arquivos(lista_arquivos, tipo_nota, chaves_processadas, contadores
                             with z.open(nome_arquivo_interno) as f:
                                 dados_finais.extend(extrair_dados_xml(f, tipo_nota, nome_arquivo_interno, chaves_processadas, contadores))
             except Exception as e:
-                st.error(f"Erro ao abrir o arquivo ZIP {arquivo.name}: {e}")
+                st.error(f"Erro ao abrir o ficheiro ZIP {arquivo.name}: {e}")
         elif arquivo.name.lower().endswith('.xml'):
             dados_finais.extend(extrair_dados_xml(arquivo, tipo_nota, arquivo.name, chaves_processadas, contadores))
     return pd.DataFrame(dados_finais)
 
 # ==========================================
-# CRIAÇÃO DAS ABAS (TABS)
+# CRIAÇÃO DOS SEPARADORES (TABS)
 # ==========================================
 aba_saidas, aba_entradas = st.tabs(["📉 Saídas (Vendas e Devoluções)", "📦 Entradas (Compras)"])
 
@@ -120,18 +116,22 @@ aba_saidas, aba_entradas = st.tabs(["📉 Saídas (Vendas e Devoluções)", "�
 with aba_saidas:
     st.header("Análise de Saídas e Devoluções")
     
+    # NOVO: Upload do Histórico
+    st.subheader("🕰️ Passo 1: Histórico Anterior (Opcional)")
+    st.info("Carregue a última planilha Excel gerada por esta aplicação para acumular os dados.")
+    historico_saidas = st.file_uploader("Ficheiro Excel de Histórico (Saídas)", type=['xlsx'], key=f"hist_saidas_{st.session_state.upload_key_saidas}")
+    
+    st.divider()
+    st.subheader("📥 Passo 2: Novas Notas Fiscais")
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("📥 Notas de Venda")
         arquivos_venda = st.file_uploader("XMLs/ZIP de Venda", type=['xml', 'zip'], accept_multiple_files=True, key=f"vendas_{st.session_state.upload_key_saidas}")
 
     with col2:
-        st.subheader("📤 Notas de Devolução")
         arquivos_devolucao = st.file_uploader("XMLs/ZIP de Devolução", type=['xml', 'zip'], accept_multiple_files=True, key=f"devolucoes_{st.session_state.upload_key_saidas}")
 
     st.divider()
-    st.subheader("📅 Filtro de Período (Opcional)")
-    usar_filtro_data_saidas = st.checkbox("Filtrar resultados por Data de Emissão", key="check_data_saidas")
+    usar_filtro_data_saidas = st.checkbox("Filtrar Novas Notas por Data de Emissão", key="check_data_saidas")
 
     data_inicial_saidas, data_final_saidas = None, None
     if usar_filtro_data_saidas:
@@ -146,83 +146,108 @@ with aba_saidas:
     st.divider()
     col_btn1, col_btn2 = st.columns([2, 8])
     with col_btn1:
-        st.button("🗑️ Limpar Arquivos", on_click=limpar_uploads_saidas, key="btn_limpar_saidas")
+        st.button("🗑️ Limpar Tudo", on_click=limpar_uploads_saidas, key="btn_limpar_saidas")
     with col_btn2:
-        gerar_saidas = st.button("🚀 Gerar Relatório de Vendas/Devoluções", type="primary", key="btn_gerar_saidas")
+        gerar_saidas = st.button("🚀 Gerar Relatório Atualizado", type="primary", key="btn_gerar_saidas")
 
     if gerar_saidas:
-        if not arquivos_venda and not arquivos_devolucao:
-            st.warning("⚠️ Faça o upload de pelo menos um arquivo para continuar.")
+        if not arquivos_venda and not arquivos_devolucao and not historico_saidas:
+            st.warning("⚠️ Carregue novos XMLs ou pelo menos um histórico para continuar.")
         elif usar_filtro_data_saidas and data_inicial_saidas > data_final_saidas:
             st.error("Corrija o período das datas.")
         else:
-            with st.spinner("Processando Vendas, Devoluções e validando descrições..."):
+            with st.spinner("Processando dados e unindo com o histórico..."):
+                relatorio_saidas = pd.DataFrame()
                 chaves_processadas_saidas = set()
                 cont_saidas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
                 
-                df_vendas = processar_arquivos(arquivos_venda, 'Venda', chaves_processadas_saidas, cont_saidas) if arquivos_venda else pd.DataFrame()
-                df_devolucoes = processar_arquivos(arquivos_devolucao, 'Devolucao', chaves_processadas_saidas, cont_saidas) if arquivos_devolucao else pd.DataFrame()
-                
-                df_total_saidas = pd.concat([df_vendas, df_devolucoes])
-                
-                if not df_total_saidas.empty:
-                    df_total_saidas['DataFormatada'] = pd.to_datetime(df_total_saidas['DataEmissaoRaw'], errors='coerce').dt.date
+                # Processa os XMLs novos se existirem
+                if arquivos_venda or arquivos_devolucao:
+                    df_vendas = processar_arquivos(arquivos_venda, 'Venda', chaves_processadas_saidas, cont_saidas) if arquivos_venda else pd.DataFrame()
+                    df_devolucoes = processar_arquivos(arquivos_devolucao, 'Devolucao', chaves_processadas_saidas, cont_saidas) if arquivos_devolucao else pd.DataFrame()
                     
-                    if usar_filtro_data_saidas:
-                        df_total_saidas = df_total_saidas[(df_total_saidas['DataFormatada'] >= data_inicial_saidas) & (df_total_saidas['DataFormatada'] <= data_final_saidas)]
+                    df_total_saidas = pd.concat([df_vendas, df_devolucoes])
                     
-                    if df_total_saidas.empty:
-                        st.warning("Nenhum produto encontrado no período selecionado.")
-                    else:
-                        # 1. Encontrar a melhor DESCRIÇÃO para cada SKU (maior volume de movimentação)
-                        df_descricoes_saidas = df_total_saidas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
-                        df_melhor_desc_saidas = df_descricoes_saidas.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                    if not df_total_saidas.empty:
+                        df_total_saidas['DataFormatada'] = pd.to_datetime(df_total_saidas['DataEmissaoRaw'], errors='coerce').dt.date
                         
-                        # 2. Criar a Tabela Dinâmica (Pivot Table) para Vendas e Devoluções
-                        relatorio_saidas = pd.pivot_table(df_total_saidas, values='Quantidade', index='SKU', columns='Tipo', aggfunc='sum', fill_value=0).reset_index()
+                        if usar_filtro_data_saidas:
+                            df_total_saidas = df_total_saidas[(df_total_saidas['DataFormatada'] >= data_inicial_saidas) & (df_total_saidas['DataFormatada'] <= data_final_saidas)]
                         
-                        if 'Venda' not in relatorio_saidas.columns: relatorio_saidas['Venda'] = 0
-                        if 'Devolucao' not in relatorio_saidas.columns: relatorio_saidas['Devolucao'] = 0
+                        if not df_total_saidas.empty:
+                            df_descricoes_saidas = df_total_saidas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
+                            df_melhor_desc_saidas = df_descricoes_saidas.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
                             
-                        relatorio_saidas['Saldo Líquido'] = relatorio_saidas['Venda'] - relatorio_saidas['Devolucao']
+                            relatorio_saidas = pd.pivot_table(df_total_saidas, values='Quantidade', index='SKU', columns='Tipo', aggfunc='sum', fill_value=0).reset_index()
+                            if 'Venda' not in relatorio_saidas.columns: relatorio_saidas['Venda'] = 0
+                            if 'Devolucao' not in relatorio_saidas.columns: relatorio_saidas['Devolucao'] = 0
+                            
+                            relatorio_saidas = pd.merge(relatorio_saidas, df_melhor_desc_saidas[['SKU', 'Descricao']], on='SKU', how='left')
+                            relatorio_saidas['SKU'] = relatorio_saidas['SKU'].astype(str)
+
+                # Unir com o Histórico
+                if historico_saidas is not None:
+                    try:
+                        df_hist = pd.read_excel(historico_saidas)
+                        # Garante que as colunas necessárias existam no histórico
+                        for col in ['SKU', 'Descricao', 'Venda', 'Devolucao']:
+                            if col not in df_hist.columns:
+                                df_hist[col] = 0 if col not in ['SKU', 'Descricao'] else 'Sem Dados'
                         
-                        # 3. Mesclar a Tabela Dinâmica com a Melhor Descrição
-                        relatorio_saidas = pd.merge(relatorio_saidas, df_melhor_desc_saidas[['SKU', 'Descricao']], on='SKU', how='left')
+                        df_hist['SKU'] = df_hist['SKU'].astype(str) # Padroniza SKU como texto
                         
-                        # 4. Organizar a ordem das colunas
-                        relatorio_saidas = relatorio_saidas[['SKU', 'Descricao', 'Venda', 'Devolucao', 'Saldo Líquido']]
-                        relatorio_saidas = relatorio_saidas.sort_values(by='Venda', ascending=False)
-                        
-                        st.success(f"✅ Sucesso! Lidas {len(chaves_processadas_saidas) - cont_saidas['sem_sku']} notas válidas.")
-                        if cont_saidas['duplicatas'] > 0: st.warning(f"🔄 Ignorados {cont_saidas['duplicatas']} arquivos repetidos.")
-                        if cont_saidas['sem_sku'] > 0:
-                            st.error(f"⚠️ {cont_saidas['sem_sku']} arquivos sem produtos.")
-                            with st.expander("👀 Ver arquivos"):
-                                for arq in cont_saidas['nomes_sem_sku']: st.write(f"- {arq}")
-                        
-                        st.dataframe(relatorio_saidas, use_container_width=True)
-                        
-                        buffer = io.BytesIO()
-                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                            relatorio_saidas.to_excel(writer, index=False, sheet_name='Saidas_e_Devolucoes')
-                        
-                        nome_excel_saidas = f"relatorio_saidas_{data_inicial_saidas}_a_{data_final_saidas}.xlsx" if usar_filtro_data_saidas else "relatorio_saidas_total.xlsx"
-                        st.download_button("💾 Baixar Excel (Vendas)", data=buffer.getvalue(), file_name=nome_excel_saidas, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_saidas")
+                        if not relatorio_saidas.empty:
+                            # Mescla (soma) os novos dados com o histórico
+                            relatorio_saidas = pd.merge(relatorio_saidas, df_hist, on='SKU', how='outer', suffixes=('_novo', '_hist'))
+                            relatorio_saidas['Venda'] = relatorio_saidas['Venda_novo'].fillna(0) + relatorio_saidas['Venda_hist'].fillna(0)
+                            relatorio_saidas['Devolucao'] = relatorio_saidas['Devolucao_novo'].fillna(0) + relatorio_saidas['Devolucao_hist'].fillna(0)
+                            relatorio_saidas['Descricao'] = relatorio_saidas['Descricao_novo'].combine_first(relatorio_saidas['Descricao_hist'])
+                        else:
+                            relatorio_saidas = df_hist.copy()
+                            
+                    except Exception as e:
+                        st.error(f"Erro ao processar o histórico: {e}")
+
+                # Finaliza o Relatório
+                if not relatorio_saidas.empty:
+                    # Garante as colunas e recalcula o Saldo Líquido
+                    for col in ['Venda', 'Devolucao']:
+                        if col not in relatorio_saidas.columns: relatorio_saidas[col] = 0
+                    
+                    relatorio_saidas['Saldo Líquido'] = relatorio_saidas['Venda'] - relatorio_saidas['Devolucao']
+                    relatorio_saidas = relatorio_saidas[['SKU', 'Descricao', 'Venda', 'Devolucao', 'Saldo Líquido']]
+                    relatorio_saidas = relatorio_saidas.sort_values(by='Venda', ascending=False)
+                    
+                    st.success(f"✅ Sucesso! Relatório atualizado gerado.")
+                    if cont_saidas['sem_sku'] > 0: st.warning(f"⚠️ {cont_saidas['sem_sku']} XMLs sem produtos ignorados.")
+                    
+                    st.dataframe(relatorio_saidas, use_container_width=True)
+                    
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        relatorio_saidas.to_excel(writer, index=False, sheet_name='Saidas_e_Devolucoes')
+                    
+                    st.download_button("💾 Baixar Excel Consolidado", data=buffer.getvalue(), file_name="relatorio_saidas_acumulado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_saidas")
                 else:
-                    st.error("❌ Nenhum dado válido encontrado.")
+                    st.error("❌ Nenhum dado válido encontrado para gerar o relatório.")
 
 # ------------------------------------------
 # ABA 2: NOTAS DE ENTRADA (COMPRAS)
 # ------------------------------------------
 with aba_entradas:
     st.header("Análise de Entradas (Compras)")
-    st.write("Suba os XMLs dos seus fornecedores para agrupar as quantidades recebidas e descobrir a descrição principal de cada SKU.")
     
-    arquivos_entrada = st.file_uploader("Selecione os XMLs ou um ZIP de Entrada", type=['xml', 'zip'], accept_multiple_files=True, key=f"entradas_{st.session_state.upload_key_entradas}")
+    # NOVO: Upload do Histórico Entradas
+    st.subheader("🕰️ Passo 1: Histórico Anterior (Opcional)")
+    st.info("Carregue a última planilha Excel de Entradas para acumular o inventário.")
+    historico_entradas = st.file_uploader("Ficheiro Excel de Histórico (Entradas)", type=['xlsx'], key=f"hist_entradas_{st.session_state.upload_key_entradas}")
+    
+    st.divider()
+    st.subheader("📥 Passo 2: Novas Notas de Entrada")
+    arquivos_entrada = st.file_uploader("XMLs ou ZIP de Entrada", type=['xml', 'zip'], accept_multiple_files=True, key=f"entradas_{st.session_state.upload_key_entradas}")
 
     st.divider()
-    st.subheader("📅 Filtro de Período (Opcional)")
-    usar_filtro_data_entradas = st.checkbox("Filtrar resultados por Data de Emissão", key="check_data_entradas")
+    usar_filtro_data_entradas = st.checkbox("Filtrar Novas Notas por Data de Emissão", key="check_data_entradas")
 
     data_inicial_entradas, data_final_entradas = None, None
     if usar_filtro_data_entradas:
@@ -237,15 +262,76 @@ with aba_entradas:
     st.divider()
     col_btn3, col_btn4 = st.columns([2, 8])
     with col_btn3:
-        st.button("🗑️ Limpar Arquivos", on_click=limpar_uploads_entradas, key="btn_limpar_entradas")
+        st.button("🗑️ Limpar Tudo", on_click=limpar_uploads_entradas, key="btn_limpar_entradas")
     with col_btn4:
-        gerar_entradas = st.button("🚀 Gerar Relatório de Entradas", type="primary", key="btn_gerar_entradas")
+        gerar_entradas = st.button("🚀 Gerar Relatório Atualizado", type="primary", key="btn_gerar_entradas")
 
     if gerar_entradas:
-        if not arquivos_entrada:
-            st.warning("⚠️ Faça o upload de pelo menos um arquivo de entrada para continuar.")
+        if not arquivos_entrada and not historico_entradas:
+            st.warning("⚠️ Carregue novos XMLs ou pelo menos um histórico para continuar.")
         elif usar_filtro_data_entradas and data_inicial_entradas > data_final_entradas:
             st.error("Corrija o período das datas.")
         else:
-            with st.spinner("Processando Notas de Entrada e validando descrições..."):
-                ch
+            with st.spinner("Processando Notas e atualizando histórico..."):
+                relatorio_entradas = pd.DataFrame()
+                chaves_processadas_entradas = set()
+                cont_entradas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
+                
+                # Processa os XMLs novos se existirem
+                if arquivos_entrada:
+                    df_entradas = processar_arquivos(arquivos_entrada, 'Entrada', chaves_processadas_entradas, cont_entradas)
+                    
+                    if not df_entradas.empty:
+                        df_entradas['DataFormatada'] = pd.to_datetime(df_entradas['DataEmissaoRaw'], errors='coerce').dt.date
+                        
+                        if usar_filtro_data_entradas:
+                            df_entradas = df_entradas[(df_entradas['DataFormatada'] >= data_inicial_entradas) & (df_entradas['DataFormatada'] <= data_final_entradas)]
+                        
+                        if not df_entradas.empty:
+                            df_total_sku = df_entradas.groupby('SKU', as_index=False)['Quantidade'].sum()
+                            df_total_sku = df_total_sku.rename(columns={'Quantidade': 'Quantidade Comprada'})
+                            
+                            df_descricoes = df_entradas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
+                            df_melhor_descricao = df_descricoes.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                            
+                            relatorio_entradas = pd.merge(df_total_sku, df_melhor_descricao[['SKU', 'Descricao']], on='SKU')
+                            relatorio_entradas['SKU'] = relatorio_entradas['SKU'].astype(str)
+
+                # Unir com o Histórico
+                if historico_entradas is not None:
+                    try:
+                        df_hist_ent = pd.read_excel(historico_entradas)
+                        for col in ['SKU', 'Descricao', 'Quantidade Comprada']:
+                            if col not in df_hist_ent.columns:
+                                df_hist_ent[col] = 0 if col != 'Descricao' else 'Sem Dados'
+                        
+                        df_hist_ent['SKU'] = df_hist_ent['SKU'].astype(str)
+                        
+                        if not relatorio_entradas.empty:
+                            relatorio_entradas = pd.merge(relatorio_entradas, df_hist_ent, on='SKU', how='outer', suffixes=('_novo', '_hist'))
+                            relatorio_entradas['Quantidade Comprada'] = relatorio_entradas['Quantidade Comprada_novo'].fillna(0) + relatorio_entradas['Quantidade Comprada_hist'].fillna(0)
+                            relatorio_entradas['Descricao'] = relatorio_entradas['Descricao_novo'].combine_first(relatorio_entradas['Descricao_hist'])
+                        else:
+                            relatorio_entradas = df_hist_ent.copy()
+                    except Exception as e:
+                        st.error(f"Erro ao ler o histórico: {e}")
+
+                # Finaliza o Relatório
+                if not relatorio_entradas.empty:
+                    if 'Quantidade Comprada' not in relatorio_entradas.columns: relatorio_entradas['Quantidade Comprada'] = 0
+                    
+                    relatorio_entradas = relatorio_entradas[['SKU', 'Descricao', 'Quantidade Comprada']]
+                    relatorio_entradas = relatorio_entradas.sort_values(by='Quantidade Comprada', ascending=False)
+                    
+                    st.success(f"✅ Inventário atualizado com sucesso!")
+                    if cont_entradas['sem_sku'] > 0: st.warning(f"⚠️ {cont_entradas['sem_sku']} XMLs ignorados por não terem produtos.")
+                            
+                    st.dataframe(relatorio_entradas, use_container_width=True)
+                    
+                    buffer_ent = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ent, engine='openpyxl') as writer:
+                        relatorio_entradas.to_excel(writer, index=False, sheet_name='Entradas')
+                    
+                    st.download_button("💾 Baixar Excel Consolidado", data=buffer_ent.getvalue(), file_name="relatorio_entradas_acumulado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
+                else:
+                    st.error("❌ Nenhum dado válido encontrado para gerar o relatório.")
