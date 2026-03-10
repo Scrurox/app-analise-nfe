@@ -11,7 +11,7 @@ st.set_page_config(page_title="Analisador de NF-e", layout="wide")
 st.title("📊 Analisador Inteligente de NF-e por SKU")
 st.write("Navegue pelas abas abaixo para analisar suas Vendas/Devoluções ou suas Notas de Entrada (Compras).")
 
-# --- CONTROLES DE SESSÃO (Para limpar arquivos independentemente) ---
+# --- CONTROLES DE SESSÃO ---
 if "upload_key_saidas" not in st.session_state:
     st.session_state.upload_key_saidas = 0
 if "upload_key_entradas" not in st.session_state:
@@ -68,14 +68,17 @@ def extrair_dados_xml(arquivo_lido, tipo_nota, nome_arquivo, chaves_processadas,
             if prod is not None:
                 sku_node = prod.find('nfe:cProd', ns)
                 qtd_node = prod.find('nfe:qCom', ns)
+                desc_node = prod.find('nfe:xProd', ns) # Nova extração: Descrição do produto
                 
                 if sku_node is not None and qtd_node is not None:
                     sku = sku_node.text
                     quantidade = float(qtd_node.text)
+                    descricao = desc_node.text if desc_node is not None else "Sem Descrição"
                     
                     dados_extraidos.append({
                         'DataEmissaoRaw': data_emissao_str,
                         'SKU': sku,
+                        'Descricao': descricao, # Adicionado ao dicionário
                         'Quantidade': quantidade,
                         'Tipo': tipo_nota
                     })
@@ -180,11 +183,6 @@ with aba_saidas:
                         relatorio_saidas = relatorio_saidas.sort_values(by='Venda', ascending=False)
                         
                         st.success(f"✅ Sucesso! Lidas {len(chaves_processadas_saidas) - cont_saidas['sem_sku']} notas válidas.")
-                        if cont_saidas['duplicatas'] > 0: st.warning(f"🔄 Ignorados {cont_saidas['duplicatas']} arquivos repetidos.")
-                        if cont_saidas['sem_sku'] > 0:
-                            st.error(f"⚠️ {cont_saidas['sem_sku']} arquivos sem produtos.")
-                            with st.expander("👀 Ver arquivos"):
-                                for arq in cont_saidas['nomes_sem_sku']: st.write(f"- {arq}")
                         
                         st.dataframe(relatorio_saidas, use_container_width=True)
                         
@@ -201,7 +199,7 @@ with aba_saidas:
 # ------------------------------------------
 with aba_entradas:
     st.header("Análise de Entradas (Compras)")
-    st.write("Suba os XMLs dos seus fornecedores para agrupar as quantidades recebidas de cada SKU.")
+    st.write("Suba os XMLs dos seus fornecedores para agrupar as quantidades recebidas e descobrir a descrição principal de cada SKU.")
     
     arquivos_entrada = st.file_uploader("Selecione os XMLs ou um ZIP de Entrada", type=['xml', 'zip'], accept_multiple_files=True, key=f"entradas_{st.session_state.upload_key_entradas}")
 
@@ -232,7 +230,7 @@ with aba_entradas:
         elif usar_filtro_data_entradas and data_inicial_entradas > data_final_entradas:
             st.error("Corrija o período das datas.")
         else:
-            with st.spinner("Processando Notas de Entrada..."):
+            with st.spinner("Processando Notas de Entrada e validando descrições..."):
                 chaves_processadas_entradas = set()
                 cont_entradas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
                 
@@ -247,19 +245,24 @@ with aba_entradas:
                     if df_entradas.empty:
                         st.warning("Nenhum produto encontrado no período selecionado.")
                     else:
-                        # Para entradas, apenas somamos as quantidades por SKU
-                        relatorio_entradas = df_entradas.groupby('SKU', as_index=False)['Quantidade'].sum()
+                        # 1. Calcula a QUANTIDADE TOTAL por SKU
+                        df_total_sku = df_entradas.groupby('SKU', as_index=False)['Quantidade'].sum()
+                        df_total_sku = df_total_sku.rename(columns={'Quantidade': 'Quantidade Comprada'})
                         
-                        # Renomeia a coluna para ficar claro na planilha
-                        relatorio_entradas = relatorio_entradas.rename(columns={'Quantidade': 'Quantidade Comprada (Entrada)'})
-                        relatorio_entradas = relatorio_entradas.sort_values(by='Quantidade Comprada (Entrada)', ascending=False)
+                        # 2. Descobre qual DESCRIÇÃO teve a maior quantidade para aquele SKU
+                        # Agrupa por SKU e Descrição e soma
+                        df_descricoes = df_entradas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
+                        # Ordena da maior quantidade para a menor, e remove duplicatas mantendo a primeira (que será a maior)
+                        df_melhor_descricao = df_descricoes.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                        
+                        # 3. Junta as duas informações (Total real + Melhor Descrição)
+                        relatorio_entradas = pd.merge(df_total_sku, df_melhor_descricao[['SKU', 'Descricao']], on='SKU')
+                        
+                        # 4. Organiza a ordem das colunas para: SKU, Descricao, Quantidade
+                        relatorio_entradas = relatorio_entradas[['SKU', 'Descricao', 'Quantidade Comprada']]
+                        relatorio_entradas = relatorio_entradas.sort_values(by='Quantidade Comprada', ascending=False)
                         
                         st.success(f"✅ Sucesso! Lidas {len(chaves_processadas_entradas) - cont_entradas['sem_sku']} notas de entrada válidas.")
-                        if cont_entradas['duplicatas'] > 0: st.warning(f"🔄 Ignorados {cont_entradas['duplicatas']} arquivos repetidos.")
-                        if cont_entradas['sem_sku'] > 0:
-                            st.error(f"⚠️ {cont_entradas['sem_sku']} arquivos sem produtos.")
-                            with st.expander("👀 Ver arquivos"):
-                                for arq in cont_entradas['nomes_sem_sku']: st.write(f"- {arq}")
                         
                         st.dataframe(relatorio_entradas, use_container_width=True)
                         
@@ -267,6 +270,12 @@ with aba_entradas:
                         with pd.ExcelWriter(buffer_ent, engine='openpyxl') as writer:
                             relatorio_entradas.to_excel(writer, index=False, sheet_name='Entradas')
                         
-                        st.download_button("💾 Baixar Excel (Entradas)", data=buffer_ent.getvalue(), file_name="relatorio_entradas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
+                        # Nome do arquivo dinâmico
+                        if usar_filtro_data_entradas:
+                            nome_excel_entradas = f"relatorio_entradas_{data_inicial_entradas}_a_{data_final_entradas}.xlsx"
+                        else:
+                            nome_excel_entradas = "relatorio_entradas_total.xlsx"
+                            
+                        st.download_button("💾 Baixar Excel (Entradas)", data=buffer_ent.getvalue(), file_name=nome_excel_entradas, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
                 else:
                     st.error("❌ Nenhum dado válido encontrado.")
