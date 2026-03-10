@@ -278,15 +278,112 @@ with aba_impostos:
     st.write("Suba os XMLs das suas notas de saída para extrair os valores totais de ICMS, PIS e COFINS cobrados por cada SKU.")
     
     st.subheader("🕰️ Passo 1: Histórico Anterior (Opcional)")
-    historico_impostos = st.file_uploader("Ficheiro Excel de Histórico (Impostos)", type=['xlsx'], key=f"hist_impostos_{st.session_state.upload_key_impostos}")
+    historico_impostos = st.file_uploader(
+        "Ficheiro Excel de Histórico (Impostos)", 
+        type=['xlsx'], 
+        key=f"hist_impostos_{st.session_state.upload_key_impostos}"
+    )
     
     st.divider()
     st.subheader("📥 Passo 2: Novas Notas Fiscais de Venda/Saída")
-    arquivos_impostos = st.file_uploader("XMLs ou ZIP de Saídas", type=['xml', 'zip'], accept_multiple_files=True, key=f"impostos_{st.session_state.upload_key_impostos}")
+    arquivos_impostos = st.file_uploader(
+        "XMLs ou ZIP de Saídas", 
+        type=['xml', 'zip'], 
+        accept_multiple_files=True, 
+        key=f"impostos_{st.session_state.upload_key_impostos}"
+    )
 
     st.divider()
     usar_filtro_data_impostos = st.checkbox("Filtrar Novas Notas por Data de Emissão", key="check_data_impostos")
     data_inicial_impostos, data_final_impostos = None, None
+    
     if usar_filtro_data_impostos:
         col_d5, col_d6 = st.columns(2)
-        with col_d5: data_inicial_impostos = st.date_input("Data Inicial", format
+        with col_d5: 
+            data_inicial_impostos = st.date_input(
+                "Data Inicial", 
+                format="DD/MM/YYYY", 
+                key="d_ini_impostos"
+            )
+        with col_d6: 
+            data_final_impostos = st.date_input(
+                "Data Final", 
+                format="DD/MM/YYYY", 
+                key="d_fim_impostos"
+            )
+
+    st.divider()
+    col_btn5, col_btn6 = st.columns([2, 8])
+    with col_btn5: 
+        st.button("🗑️ Limpar Tudo", on_click=limpar_uploads_impostos, key="btn_limpar_impostos")
+    with col_btn6: 
+        gerar_impostos = st.button("🚀 Gerar Relatório de Impostos", type="primary", key="btn_gerar_impostos")
+
+    if gerar_impostos:
+        if not arquivos_impostos and not historico_impostos:
+            st.warning("⚠️ Carregue novos XMLs ou pelo menos um histórico para continuar.")
+        elif usar_filtro_data_impostos and data_inicial_impostos > data_final_impostos:
+            st.error("Corrija o período das datas.")
+        else:
+            with st.spinner("Extraindo bases de cálculo e impostos (ICMS, PIS, COFINS)..."):
+                relatorio_impostos = pd.DataFrame()
+                chaves_processadas_impostos = set()
+                cont_impostos = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
+                
+                # Processa os XMLs novos
+                if arquivos_impostos:
+                    df_impostos = processar_arquivos(arquivos_impostos, 'Saida', chaves_processadas_impostos, cont_impostos)
+                    
+                    if not df_impostos.empty:
+                        df_impostos['DataFormatada'] = pd.to_datetime(df_impostos['DataEmissaoRaw'], errors='coerce').dt.date
+                        
+                        if usar_filtro_data_impostos:
+                            df_impostos = df_impostos[(df_impostos['DataFormatada'] >= data_inicial_impostos) & (df_impostos['DataFormatada'] <= data_final_impostos)]
+                        
+                        if not df_impostos.empty:
+                            # Agrupa por SKU e Descrição, somando Quantidade, Valor e os 3 impostos
+                            df_imp_agrupado = df_impostos.groupby(['SKU', 'Descricao'], as_index=False)[['Quantidade', 'Valor Produto', 'ICMS', 'PIS', 'COFINS']].sum()
+                            
+                            # Filtra a melhor descrição
+                            df_melhor_desc_imp = df_imp_agrupado.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                            
+                            relatorio_impostos = df_melhor_desc_imp.copy()
+                            relatorio_impostos['SKU'] = relatorio_impostos['SKU'].astype(str)
+
+                # Unir com o Histórico
+                if historico_impostos is not None:
+                    try:
+                        df_hist_imp = pd.read_excel(historico_impostos)
+                        colunas_necessarias = ['SKU', 'Descricao', 'Quantidade', 'Valor Produto', 'ICMS', 'PIS', 'COFINS']
+                        for col in colunas_necessarias:
+                            if col not in df_hist_imp.columns:
+                                df_hist_imp[col] = 0 if col != 'Descricao' else 'Sem Dados'
+                        
+                        df_hist_imp['SKU'] = df_hist_imp['SKU'].astype(str)
+                        
+                        if not relatorio_impostos.empty:
+                            relatorio_impostos = pd.merge(relatorio_impostos, df_hist_imp, on='SKU', how='outer', suffixes=('_novo', '_hist'))
+                            for col in ['Quantidade', 'Valor Produto', 'ICMS', 'PIS', 'COFINS']:
+                                relatorio_impostos[col] = relatorio_impostos[f'{col}_novo'].fillna(0) + relatorio_impostos[f'{col}_hist'].fillna(0)
+                            relatorio_impostos['Descricao'] = relatorio_impostos['Descricao_novo'].combine_first(relatorio_impostos['Descricao_hist'])
+                        else:
+                            relatorio_impostos = df_hist_imp.copy()
+                    except Exception as e:
+                        st.error(f"Erro ao ler o histórico: {e}")
+
+                # Finaliza o Relatório
+                if not relatorio_impostos.empty:
+                    relatorio_impostos = relatorio_impostos[['SKU', 'Descricao', 'Quantidade', 'Valor Produto', 'ICMS', 'PIS', 'COFINS']]
+                    relatorio_impostos = relatorio_impostos.sort_values(by='Valor Produto', ascending=False)
+                    
+                    st.success(f"✅ Impostos extraídos com sucesso de {len(chaves_processadas_impostos) - cont_impostos['sem_sku']} notas válidas.")
+                            
+                    st.dataframe(relatorio_impostos, use_container_width=True)
+                    
+                    buffer_imp = io.BytesIO()
+                    with pd.ExcelWriter(buffer_imp, engine='openpyxl') as writer:
+                        relatorio_impostos.to_excel(writer, index=False, sheet_name='Impostos')
+                    
+                    st.download_button("💾 Baixar Excel de Impostos", data=buffer_imp.getvalue(), file_name="relatorio_impostos_saida.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_impostos")
+                else:
+                    st.error("❌ Nenhum dado válido encontrado para gerar o relatório.")
