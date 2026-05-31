@@ -206,11 +206,13 @@ with aba_saidas:
                 st.download_button("💾 Baixar Excel Consolidado", data=buffer.getvalue(), file_name="relatorio_saidas_acumulado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_saidas")
 
 # ------------------------------------------
-# ABA 2: NOTAS DE ENTRADA (Código idêntico à versão anterior)
+# ABA 2: NOTAS DE ENTRADA (COMPRAS)
 # ------------------------------------------
 with aba_entradas:
     st.header("Análise de Entradas (Compras)")
+    
     st.subheader("🕰️ Passo 1: Histórico Anterior (Opcional)")
+    st.info("Carregue a última planilha Excel de Entradas para acumular o inventário e manter o preço médio histórico.")
     historico_entradas = st.file_uploader("Ficheiro Excel de Histórico (Entradas)", type=['xlsx'], key=f"hist_entradas_{st.session_state.upload_key_entradas}")
     
     st.divider()
@@ -219,56 +221,109 @@ with aba_entradas:
 
     st.divider()
     usar_filtro_data_entradas = st.checkbox("Filtrar Novas Notas por Data de Emissão", key="check_data_entradas")
+
     data_inicial_entradas, data_final_entradas = None, None
     if usar_filtro_data_entradas:
         col_d3, col_d4 = st.columns(2)
-        with col_d3: data_inicial_entradas = st.date_input("Data Inicial", format="DD/MM/YYYY", key="d_ini_entradas")
-        with col_d4: data_final_entradas = st.date_input("Data Final", format="DD/MM/YYYY", key="d_fim_entradas")
+        with col_d3:
+            data_inicial_entradas = st.date_input("Data Inicial", format="DD/MM/YYYY", key="d_ini_entradas")
+        with col_d4:
+            data_final_entradas = st.date_input("Data Final", format="DD/MM/YYYY", key="d_fim_entradas")
+        if data_inicial_entradas > data_final_entradas:
+            st.error("A Data Inicial não pode ser maior que a Data Final.")
 
     st.divider()
     col_btn3, col_btn4 = st.columns([2, 8])
-    with col_btn3: st.button("🗑️ Limpar Tudo", on_click=limpar_uploads_entradas, key="btn_limpar_entradas")
-    with col_btn4: gerar_entradas = st.button("🚀 Gerar Relatório Atualizado", type="primary", key="btn_gerar_entradas")
+    with col_btn3:
+        st.button("🗑️ Limpar Tudo", on_click=limpar_uploads_entradas, key="btn_limpar_entradas")
+    with col_btn4:
+        gerar_entradas = st.button("🚀 Gerar Relatório Atualizado", type="primary", key="btn_gerar_entradas")
 
     if gerar_entradas:
-        with st.spinner("Processando Notas..."):
-            relatorio_entradas = pd.DataFrame()
-            chaves_processadas_entradas = set()
-            cont_entradas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
-            
-            if arquivos_entrada:
-                df_entradas = processar_arquivos(arquivos_entrada, 'Entrada', chaves_processadas_entradas, cont_entradas)
-                if not df_entradas.empty:
-                    df_entradas['DataFormatada'] = pd.to_datetime(df_entradas['DataEmissaoRaw'], errors='coerce').dt.date
-                    if usar_filtro_data_entradas:
-                        df_entradas = df_entradas[(df_entradas['DataFormatada'] >= data_inicial_entradas) & (df_entradas['DataFormatada'] <= data_final_entradas)]
+        if not arquivos_entrada and not historico_entradas:
+            st.warning("⚠️ Carregue novos XMLs ou pelo menos um histórico para continuar.")
+        elif usar_filtro_data_entradas and data_inicial_entradas > data_final_entradas:
+            st.error("Corrija o período das datas.")
+        else:
+            with st.spinner("Processando Notas, atualizando histórico e calculando preço médio..."):
+                relatorio_entradas = pd.DataFrame()
+                chaves_processadas_entradas = set()
+                cont_entradas = {'duplicatas': 0, 'sem_sku': 0, 'nomes_sem_sku': []}
+                
+                # Processa os XMLs novos se existirem
+                if arquivos_entrada:
+                    df_entradas = processar_arquivos(arquivos_entrada, 'Entrada', chaves_processadas_entradas, cont_entradas)
+                    
                     if not df_entradas.empty:
-                        df_total_sku = df_entradas.groupby('SKU', as_index=False)['Quantidade'].sum()
-                        df_total_sku = df_total_sku.rename(columns={'Quantidade': 'Quantidade Comprada'})
-                        df_descricoes = df_entradas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
-                        df_melhor_descricao = df_descricoes.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
-                        relatorio_entradas = pd.merge(df_total_sku, df_melhor_descricao[['SKU', 'Descricao']], on='SKU')
-                        relatorio_entradas['SKU'] = relatorio_entradas['SKU'].astype(str)
+                        df_entradas['DataFormatada'] = pd.to_datetime(df_entradas['DataEmissaoRaw'], errors='coerce').dt.date
+                        
+                        if usar_filtro_data_entradas:
+                            df_entradas = df_entradas[(df_entradas['DataFormatada'] >= data_inicial_entradas) & (df_entradas['DataFormatada'] <= data_final_entradas)]
+                        
+                        if not df_entradas.empty:
+                            # AGORA SOMAMOS TAMBÉM O VALOR DO PRODUTO
+                            df_total_sku = df_entradas.groupby('SKU', as_index=False)[['Quantidade', 'Valor Produto']].sum()
+                            df_total_sku = df_total_sku.rename(columns={'Quantidade': 'Quantidade Comprada', 'Valor Produto': 'Valor Total Comprado'})
+                            
+                            df_descricoes = df_entradas.groupby(['SKU', 'Descricao'], as_index=False)['Quantidade'].sum()
+                            df_melhor_descricao = df_descricoes.sort_values(by=['SKU', 'Quantidade'], ascending=[True, False]).drop_duplicates(subset=['SKU'], keep='first')
+                            
+                            relatorio_entradas = pd.merge(df_total_sku, df_melhor_descricao[['SKU', 'Descricao']], on='SKU')
+                            relatorio_entradas['SKU'] = relatorio_entradas['SKU'].astype(str)
 
-            if historico_entradas is not None:
-                df_hist_ent = pd.read_excel(historico_entradas)
-                for col in ['SKU', 'Descricao', 'Quantidade Comprada']:
-                    if col not in df_hist_ent.columns: df_hist_ent[col] = 0 if col != 'Descricao' else 'Sem Dados'
-                df_hist_ent['SKU'] = df_hist_ent['SKU'].astype(str)
+                # Unir com o Histórico
+                if historico_entradas is not None:
+                    try:
+                        df_hist_ent = pd.read_excel(historico_entradas)
+                        
+                        # Garante que as colunas antigas existam, adicionando o Valor Total para o cálculo do preço médio
+                        for col in ['SKU', 'Descricao', 'Quantidade Comprada', 'Valor Total Comprado']:
+                            if col not in df_hist_ent.columns:
+                                df_hist_ent[col] = 0.0 if col not in ['Descricao', 'SKU'] else 'Sem Dados'
+                        
+                        df_hist_ent['SKU'] = df_hist_ent['SKU'].astype(str)
+                        
+                        if not relatorio_entradas.empty:
+                            relatorio_entradas = pd.merge(relatorio_entradas, df_hist_ent, on='SKU', how='outer', suffixes=('_novo', '_hist'))
+                            relatorio_entradas['Quantidade Comprada'] = relatorio_entradas['Quantidade Comprada_novo'].fillna(0) + relatorio_entradas['Quantidade Comprada_hist'].fillna(0)
+                            relatorio_entradas['Valor Total Comprado'] = relatorio_entradas['Valor Total Comprado_novo'].fillna(0) + relatorio_entradas['Valor Total Comprado_hist'].fillna(0)
+                            relatorio_entradas['Descricao'] = relatorio_entradas['Descricao_novo'].combine_first(relatorio_entradas['Descricao_hist'])
+                        else:
+                            relatorio_entradas = df_hist_ent.copy()
+                    except Exception as e:
+                        st.error(f"Erro ao ler o histórico: {e}")
+
+                # Finaliza o Relatório e Calcula a Média
                 if not relatorio_entradas.empty:
-                    relatorio_entradas = pd.merge(relatorio_entradas, df_hist_ent, on='SKU', how='outer', suffixes=('_novo', '_hist'))
-                    relatorio_entradas['Quantidade Comprada'] = relatorio_entradas['Quantidade Comprada_novo'].fillna(0) + relatorio_entradas['Quantidade Comprada_hist'].fillna(0)
-                    relatorio_entradas['Descricao'] = relatorio_entradas['Descricao_novo'].combine_first(relatorio_entradas['Descricao_hist'])
+                    if 'Quantidade Comprada' not in relatorio_entradas.columns: relatorio_entradas['Quantidade Comprada'] = 0
+                    if 'Valor Total Comprado' not in relatorio_entradas.columns: relatorio_entradas['Valor Total Comprado'] = 0.0
+                    
+                    # CALCULA O PREÇO MÉDIO DE ENTRADA (Valor Total / Quantidade)
+                    relatorio_entradas['Preço Médio de Entrada'] = relatorio_entradas.apply(
+                        lambda row: row['Valor Total Comprado'] / row['Quantidade Comprada'] if row['Quantidade Comprada'] > 0 else 0, 
+                        axis=1
+                    )
+                    
+                    # Arredonda para 2 casas decimais (formato moeda)
+                    relatorio_entradas['Preço Médio de Entrada'] = relatorio_entradas['Preço Médio de Entrada'].round(2)
+                    relatorio_entradas['Valor Total Comprado'] = relatorio_entradas['Valor Total Comprado'].round(2)
+                    
+                    # Reordena as colunas para o Excel final
+                    relatorio_entradas = relatorio_entradas[['SKU', 'Descricao', 'Quantidade Comprada', 'Valor Total Comprado', 'Preço Médio de Entrada']]
+                    relatorio_entradas = relatorio_entradas.sort_values(by='Quantidade Comprada', ascending=False)
+                    
+                    st.success(f"✅ Inventário atualizado e preços médios calculados com sucesso!")
+                    if cont_entradas['sem_sku'] > 0: st.warning(f"⚠️ {cont_entradas['sem_sku']} XMLs ignorados por não terem produtos.")
+                            
+                    st.dataframe(relatorio_entradas, use_container_width=True)
+                    
+                    buffer_ent = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ent, engine='openpyxl') as writer:
+                        relatorio_entradas.to_excel(writer, index=False, sheet_name='Entradas')
+                    
+                    st.download_button("💾 Baixar Excel Consolidado", data=buffer_ent.getvalue(), file_name="relatorio_entradas_acumulado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
                 else:
-                    relatorio_entradas = df_hist_ent.copy()
-
-            if not relatorio_entradas.empty:
-                relatorio_entradas = relatorio_entradas[['SKU', 'Descricao', 'Quantidade Comprada']].sort_values(by='Quantidade Comprada', ascending=False)
-                st.dataframe(relatorio_entradas, use_container_width=True)
-                buffer_ent = io.BytesIO()
-                with pd.ExcelWriter(buffer_ent, engine='openpyxl') as writer: relatorio_entradas.to_excel(writer, index=False, sheet_name='Entradas')
-                st.download_button("💾 Baixar Excel Consolidado", data=buffer_ent.getvalue(), file_name="relatorio_entradas_acumulado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_entradas")
-
+                    st.error("❌ Nenhum dado válido encontrado para gerar o relatório.")
 
 # ------------------------------------------
 # ABA 3: IMPOSTOS (SAÍDAS) - NOVA ABA!
